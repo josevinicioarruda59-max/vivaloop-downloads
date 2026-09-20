@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#101722">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://gbtugrphydobkpzujizm.supabase.co; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <title>VivaLoop — Notificações</title>
+</head>
+<body>
+  <main>
+    <header><img src="icon.svg" width="48" height="48" alt=""><div><span class="brand">VivaLoop</span><p>Notificações da sua live</p></div></header>
+    <section class="card">
+      <h1>Conecte este celular</h1>
+      <p>Receba avisos de vendas, violações e início/fim da live. O VivaLoop precisa continuar aberto no computador.</p>
+      <aside id="installHelp" hidden><strong>No iPhone ou iPad</strong><p>No Safari, toque em Compartilhar → Adicionar à Tela de Início. Abra pelo novo ícone. Se o link não aparecer, cole-o no campo abaixo.</p></aside>
+      <form id="activateForm">
+        <label for="pairLink">Link gerado no VivaLoop</label>
+        <input id="pairLink" type="text" autocomplete="off" spellcheck="false" required placeholder="Cole o link da aba Logs">
+        <label for="email">E-mail da licença</label>
+        <input id="email" type="email" autocomplete="email" maxlength="254" required>
+        <label for="licenseKey">Chave da licença</label>
+        <input id="licenseKey" type="password" autocomplete="off" maxlength="67" required placeholder="VL-…">
+        <p class="note">A confirmação só vincula as notificações. Não ocupa outra sessão. Sua chave não é salva neste celular.</p>
+        <button id="activate" type="submit">Ativar notificações neste celular</button>
+      </form>
+      <p id="status" role="status" aria-live="polite">Use o link da aba Logs do aplicativo.</p>
+      <button id="disable" type="button" class="secondary" hidden>Desativar notificações neste celular</button>
+    </section>
+    <footer>Cada link vale por 30 minutos e só pode ser usado uma vez. Escolha quais avisos receber na aba Logs do VivaLoop.</footer>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
