@@ -1,0 +1,27 @@
+name: Validate Mac capture candidate without publication
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+          repository: josevinicioarruda59-max/vivaloop-desktop
+          ref: 1b107d65bddf0f60affdd05482bbcc7bd366dceb
+          ssh-key: ${{ secrets.TEMP_VIVALOOP_SOURCE_0353 }}
+          show-progress: false
+      - name: Compile and test on native Mac; do not upload installers or source
+        run: bash scripts/build-mac.sh '${{ matrix.arch }}'
