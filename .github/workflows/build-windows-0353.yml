@@ -15,7 +15,7 @@ jobs:
         with:
           persist-credentials: false
           repository: josevinicioarruda59-max/vivaloop-desktop
-          ref: e24dab12a21d82d7899e677ed9d5bb294f9a8f09
+          ref: fd23df7ab77a9fa2e8c6dd577b2151af878e64eb
           ssh-key: ${{ secrets.TEMP_VIVALOOP_SOURCE_0353 }}
           show-progress: false
       - name: Verify JavaScript and engine integrity
@@ -41,9 +41,11 @@ jobs:
           New-Item -ItemType Directory -Force build, dist | Out-Null
           Compress-Archive -Path 'engine/*' -DestinationPath 'build/engine.zip' -CompressionLevel Optimal -Force
       - name: Download the last verified Windows package
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $release = Invoke-RestMethod 'https://api.github.com/repos/josevinicioarruda59-max/vivaloop-downloads/releases/latest'
+          $release = Invoke-RestMethod 'https://api.github.com/repos/josevinicioarruda59-max/vivaloop-downloads/releases/latest' -Headers @{ Authorization = "Bearer $env:GH_TOKEN" }
           if ($release.draft -or $release.prerelease -or $release.tag_name -notmatch '^v\d+\.\d+\.\d+$') { throw 'Release estável inválido.' }
           $name = "VivaLoop-Desktop-$($release.tag_name)-Windows.zip"
           $asset = @($release.assets | Where-Object { $_.name -eq $name })
