@@ -20,7 +20,7 @@ jobs:
         with:
           persist-credentials: false
           repository: josevinicioarruda59-max/vivaloop-desktop
-          ref: 1b107d65bddf0f60affdd05482bbcc7bd366dceb
+          ref: f8b0fcb501f4886ce1e2f4f094354fc9f7ea02f3
           ssh-key: ${{ secrets.TEMP_VIVALOOP_SOURCE_0353 }}
           show-progress: false
       - name: Compile and test on native Mac; do not upload installers or source
