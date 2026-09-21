@@ -1,0 +1,116 @@
+name: Build windows 0.35.3 with standard runner
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: windows-package-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          repository: josevinicioarruda59-max/vivaloop-desktop
+          ref: ca66f69be8aae6aaaafb760cbcaaa2106e3e041a
+          ssh-key: ${{ secrets.TEMP_VIVALOOP_SOURCE_0353 }}
+          show-progress: false
+      - name: Verify JavaScript and engine integrity
+        shell: pwsh
+        run: |
+          node --check engine/audio-rotation-fix.js
+          node --check engine/sidebar-audio-unify.js
+          node --test tests/*.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Testes falharam." }
+          python scripts/verify-engine.py
+          & "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /out:UpdateProtocolTests.exe /reference:System.Web.Extensions.dll .\tools\UpdateProtocol.cs .\tools\UpdateProtocolTests.cs
+          if ($LASTEXITCODE -ne 0) { throw 'Updater tests failed to compile.' }
+          .\UpdateProtocolTests.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Updater tests failed.' }
+          .\tools\Test-UpdateInstall.ps1
+          & "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /out:UpdateTransactionTests.exe /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll .\tools\WindowsUpdateInstaller.cs .\tools\UpdateTransactionTests.cs
+          if ($LASTEXITCODE -ne 0) { throw 'Transaction tests failed to compile.' }
+          .\UpdateTransactionTests.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Transaction rollback test failed.' }
+      - name: Build current engine ZIP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build, dist | Out-Null
+          Compress-Archive -Path 'engine/*' -DestinationPath 'build/engine.zip' -CompressionLevel Optimal -Force
+      - name: Download the last verified Windows package
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod 'https://api.github.com/repos/josevinicioarruda59-max/vivaloop-downloads/releases/latest'
+          if ($release.draft -or $release.prerelease -or $release.tag_name -notmatch '^v\d+\.\d+\.\d+$') { throw 'Release estável inválido.' }
+          $name = "VivaLoop-Desktop-$($release.tag_name)-Windows.zip"
+          $asset = @($release.assets | Where-Object { $_.name -eq $name })
+          if ($asset.Count -ne 1 -or $asset[0].state -ne 'uploaded') { throw 'Instalador Windows ausente.' }
+          $url = "https://github.com/josevinicioarruda59-max/vivaloop-downloads/releases/download/$($release.tag_name)/$name"
+          if ($asset[0].browser_download_url -ne $url -or $asset[0].digest -notmatch '^sha256:[a-f0-9]{64}$') { throw 'Origem ou checksum inválido.' }
+          curl.exe -L --fail --retry 3 --retry-delay 3 -o build/base.zip $url
+          if ($LASTEXITCODE -ne 0) { throw 'Download da base Windows falhou.' }
+          $actual = (Get-FileHash build/base.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ("sha256:$actual" -ne $asset[0].digest) { throw 'Checksum da base Windows não confere.' }
+          Expand-Archive -Path build/base.zip -DestinationPath build/base -Force
+      - name: Update embedded engine and browser startup
+        shell: pwsh
+        run: |
+          $root = Get-ChildItem build/base -Directory | Select-Object -First 1
+          if (-not $root) { throw 'Pasta principal do pacote não encontrada.' }
+          $exe = Join-Path $root.FullName 'VivaLoopDesktop.exe'
+          if (-not (Test-Path $exe)) { throw 'VivaLoopDesktop.exe não encontrado.' }
+          dotnet run --project tools/EngineResourcePatcher/EngineResourcePatcher.csproj --configuration Release -- --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Testes do launcher falharam.' }
+          $theme = Join-Path $root.FullName 'VivaLoop.Presentation.dll'
+          & "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /target:library "/out:$theme" /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Net.Http.dll /reference:System.Web.Extensions.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll .\tools\WindowsVisualTheme.cs .\tools\UpdateProtocol.cs .\tools\WindowsUpdateGate.cs .\tools\WindowsUpdateInstaller.cs
+          if ($LASTEXITCODE -ne 0) { throw 'Compilação do tema visual falhou.' }
+          dotnet run --project tools/EngineResourcePatcher/EngineResourcePatcher.csproj --configuration Release -- $exe build/engine.zip build/VivaLoopDesktop.patched.exe $theme
+          if ($LASTEXITCODE -ne 0) { throw 'Validação do executável falhou.' }
+          Move-Item build/VivaLoopDesktop.patched.exe $exe -Force
+          .\tools\Test-UpdateInstall.ps1 -Launcher $exe
+          # Only clean known obsolete root files in the disposable build, never user installations.
+          $buildRoot = [IO.Path]::GetFullPath('build/base') + [IO.Path]::DirectorySeparatorChar
+          if (-not $root.FullName.StartsWith($buildRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid build root' }
+          Get-ChildItem -LiteralPath $root.FullName -File | Where-Object { $_.Name -like 'CORRECAO-*.txt' -or $_.Name -eq 'VivaLoop.Updater.exe' } | ForEach-Object { Remove-Item -LiteralPath $_.FullName }
+          @'
+          VIVALOOP DESKTOP 0.35.3
+
+          - Tema Cristal Neon: relógio circular, cartões de vidro e navegação sempre embaixo.
+          - Biblioteca de camadas na transmissão: cartões compactos e botão Configurar, sem setinhas.
+          - O teste grátis foi removido; as licenças disponíveis são de 30 dias e 3 meses.
+          - Mantenha VivaLoop.Presentation.dll junto do executável, como os demais arquivos do ZIP.
+
+          - Remove os botões antigos de Sair/Liberar licença do painel.
+          - Integra notificações Web Push: gere o link na aba Logs e confirme a licença no celular.
+          - Oculta a faixa informativa Chrome for Testing ao iniciar o navegador.
+          - As abas Áudio e Vídeo mostram o nome do arquivo atual e do próximo take.
+          - A opção Aleatório entre as faixas usa Trecho mínimo/máximo e Pausa mínima/máxima.
+          - A troca ocorre automaticamente, sem clicar entre uma faixa e outra.
+          - O rodízio usa todo o acervo e evita os últimos cinco takes quando há arquivos suficientes.
+          - O antigo bloco visual Áudio Infinito foi unificado com Áudio da live.
+
+          Extraia o ZIP inteiro antes de abrir VivaLoopDesktop.exe.
+          '@ | Set-Content -Encoding UTF8 (Join-Path $root.FullName 'LEIA-ME.txt')
+          Compress-Archive -Path $root.FullName -DestinationPath dist/VivaLoop-Desktop-v0.35.3-Windows.zip -CompressionLevel Optimal -Force
+          (Get-FileHash dist/VivaLoop-Desktop-v0.35.3-Windows.zip -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -Encoding ASCII dist/SHA256-Windows.txt
+      - name: Stage Windows package in private release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $version = (Get-Content engine/manifest.json | ConvertFrom-Json).version
+          gh release upload "v$version" dist/* --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Envio do pacote falhou.' }
+      - name: Preserve Windows package for pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: VivaLoop-Windows-0.35.3
+          path: dist/*
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
