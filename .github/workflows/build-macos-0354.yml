@@ -1,0 +1,39 @@
+name: Build macos 0.35.4 with standard runner
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  mac:
+    name: Native ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            label: AppleSilicon
+          - runner: macos-15-intel
+            arch: x86_64
+            label: Intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          repository: josevinicioarruda59-max/vivaloop-desktop
+          ref: 29def9ae900992412c45ea22fc2f3baef978ddbe
+          ssh-key: ${{ secrets.TEMP_VIVALOOP_SOURCE_0354 }}
+          show-progress: false
+      - name: Compile native app, test and package DMG
+        run: bash scripts/build-mac.sh '${{ matrix.arch }}'
+      - name: Stage installer and verification results in private release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "require('./engine/manifest.json').version")
+          gh release upload "v$VERSION" dist/*.dmg dist/SHA256-*.txt dist/test-results-*.txt dist/VivaLoop-Login-*.png dist/VivaLoop-Update-*.png --repo "$GITHUB_REPOSITORY" --clobber
