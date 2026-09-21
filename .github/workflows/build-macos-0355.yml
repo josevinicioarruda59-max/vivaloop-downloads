@@ -26,7 +26,7 @@ jobs:
         with:
           persist-credentials: false
           repository: josevinicioarruda59-max/vivaloop-desktop
-          ref: 525f168afdab0f4e8c6a41965a0e47022a7deac3
+          ref: 24f277ec59e207c7d52eda982d4b276bd613d7cd
           ssh-key: ${{ secrets.TEMP_VIVALOOP_SOURCE_0355 }}
           show-progress: false
       - name: Compile native app, test and package DMG

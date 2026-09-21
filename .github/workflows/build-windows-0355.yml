@@ -15,7 +15,7 @@ jobs:
         with:
           persist-credentials: false
           repository: josevinicioarruda59-max/vivaloop-desktop
-          ref: c0696b1d74ed5bcf614f17f12384a3607ac76c1b
+          ref: 24f277ec59e207c7d52eda982d4b276bd613d7cd
           ssh-key: ${{ secrets.TEMP_VIVALOOP_SOURCE_0355 }}
           show-progress: false
       - name: Verify JavaScript and engine integrity
