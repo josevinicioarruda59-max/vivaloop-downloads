@@ -1,0 +1,14 @@
+name: Check free standard runner availability
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: macos-15
+    timeout-minutes: 2
+    steps:
+      - name: Verify standard macOS build tools
+        run: |
+          sw_vers
+          xcrun swiftc --version
