@@ -1,1 +1,1 @@
-Temporary trigger for isolated VPS capture build. Do not use as a release artifact.
+Temporary trigger for isolated VPS capture build. Patch logic updated to match current stable launcher arguments.
