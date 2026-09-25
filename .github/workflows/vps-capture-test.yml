@@ -42,8 +42,8 @@ jobs:
           var input = Path.GetFullPath(args[0]);
           var output = Path.GetFullPath(args[1]);
 
-          const string original = " --disable-background-mode --no-first-run --no-default-browser-check ";
-          const string patched = " --disable-background-mode --no-first-run --no-default-browser-check --disable-infobars --disable-gpu ";
+          const string required = "--disable-background-mode";
+          const string gpuFlag = "--disable-gpu";
 
           using (var assembly = AssemblyDefinition.ReadAssembly(input, new ReaderParameters { InMemory = true, ReadSymbols = false }))
           {
@@ -52,13 +52,16 @@ jobs:
 
               var candidates = type.Methods.Where(m => m.Name == "Start" && m.HasBody)
                   .SelectMany(m => m.Body.Instructions)
-                  .Where(i => i.OpCode == OpCodes.Ldstr && i.Operand is string s && (s == original || s == patched))
+                  .Where(i => i.OpCode == OpCodes.Ldstr && i.Operand is string s && s.Contains(required, StringComparison.Ordinal) && s.Contains("--no-first-run", StringComparison.Ordinal))
                   .ToArray();
 
               if (candidates.Length != 1)
                   throw new InvalidOperationException($"Argumentos do Chrome ausentes ou ambíguos. Encontrados: {candidates.Length}");
 
-              candidates[0].Operand = patched;
+              var current = (string)candidates[0].Operand;
+              if (!current.Contains(gpuFlag, StringComparison.Ordinal))
+                  candidates[0].Operand = current.TrimEnd() + " " + gpuFlag + " ";
+
               assembly.Write(output, new WriterParameters { WriteSymbols = false });
           }
 
