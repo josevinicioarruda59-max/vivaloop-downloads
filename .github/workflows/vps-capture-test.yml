@@ -1,0 +1,115 @@
+name: VPS capture test build
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-vps-test:
+    runs-on: windows-2022
+    steps:
+      - name: Download latest stable Windows package
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod 'https://api.github.com/repos/josevinicioarruda59-max/vivaloop-downloads/releases/latest'
+          if ($release.draft -or $release.prerelease -or $release.tag_name -notmatch '^v\d+\.\d+\.\d+$') { throw 'Release estável inválido.' }
+          $assetName = "VivaLoop-Desktop-$($release.tag_name)-Windows.zip"
+          $asset = @($release.assets | Where-Object { $_.name -eq $assetName -and $_.state -eq 'uploaded' })
+          if ($asset.Count -ne 1) { throw "Asset Windows estável não encontrado: $assetName" }
+          New-Item -ItemType Directory -Force build, dist | Out-Null
+          curl.exe -L --fail --retry 3 --retry-delay 2 -o build/base.zip $asset[0].browser_download_url
+          if ($LASTEXITCODE -ne 0) { throw 'Download da base Windows falhou.' }
+          $actual = (Get-FileHash build/base.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($asset[0].digest -and $asset[0].digest -ne "sha256:$actual") { throw "Checksum da base não confere. Esperado $($asset[0].digest), obtido sha256:$actual" }
+          Expand-Archive -Path build/base.zip -DestinationPath build/base -Force
+          "BASE_VERSION=$($release.tag_name)" | Out-File -FilePath build/version.txt -Encoding ascii
+      - name: Create isolated binary patcher
+        shell: pwsh
+        run: |
+          dotnet new console -n VpsCapturePatcher -o build/patcher --framework net8.0 --force
+          dotnet add build/patcher/VpsCapturePatcher.csproj package Mono.Cecil --version 0.11.6
+          @'
+          using Mono.Cecil;
+          using Mono.Cecil.Cil;
+
+          if (args.Length != 2)
+              throw new ArgumentException("Uso: patcher <input.exe> <output.exe>");
+
+          var input = Path.GetFullPath(args[0]);
+          var output = Path.GetFullPath(args[1]);
+
+          const string original = " --disable-background-mode --no-first-run --no-default-browser-check ";
+          const string patched = " --disable-background-mode --no-first-run --no-default-browser-check --disable-infobars --disable-gpu ";
+
+          using (var assembly = AssemblyDefinition.ReadAssembly(input, new ReaderParameters { InMemory = true, ReadSymbols = false }))
+          {
+              var type = assembly.MainModule.Types.SingleOrDefault(t => t.FullName == "VivaLoopDesktop.ChromeManager")
+                  ?? throw new InvalidOperationException("VivaLoopDesktop.ChromeManager não encontrado.");
+
+              var candidates = type.Methods.Where(m => m.Name == "Start" && m.HasBody)
+                  .SelectMany(m => m.Body.Instructions)
+                  .Where(i => i.OpCode == OpCodes.Ldstr && i.Operand is string s && (s == original || s == patched))
+                  .ToArray();
+
+              if (candidates.Length != 1)
+                  throw new InvalidOperationException($"Argumentos do Chrome ausentes ou ambíguos. Encontrados: {candidates.Length}");
+
+              candidates[0].Operand = patched;
+              assembly.Write(output, new WriterParameters { WriteSymbols = false });
+          }
+
+          using (var verify = AssemblyDefinition.ReadAssembly(output, new ReaderParameters { InMemory = true, ReadSymbols = false }))
+          {
+              var type = verify.MainModule.Types.Single(t => t.FullName == "VivaLoopDesktop.ChromeManager");
+              var values = type.Methods.Where(m => m.Name == "Start" && m.HasBody)
+                  .SelectMany(m => m.Body.Instructions)
+                  .Where(i => i.OpCode == OpCodes.Ldstr && i.Operand is string)
+                  .Select(i => (string)i.Operand)
+                  .Where(s => s.Contains("--disable-background-mode", StringComparison.Ordinal))
+                  .ToArray();
+
+              if (values.Length != 1 || !values[0].Contains("--disable-gpu", StringComparison.Ordinal))
+                  throw new InvalidOperationException("Verificação falhou: --disable-gpu não está presente exatamente no launcher esperado.");
+
+              Console.WriteLine("PASS: VivaLoopDesktop.exe contém --disable-gpu no ChromeManager.Start.");
+          }
+          '@ | Set-Content -Encoding UTF8 build/patcher/Program.cs
+      - name: Patch executable and package
+        shell: pwsh
+        run: |
+          $root = Get-ChildItem build/base -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'VivaLoopDesktop.exe') } | Select-Object -First 1
+          if (-not $root) { throw 'Pasta do VivaLoop não encontrada no ZIP.' }
+          $exe = Join-Path $root.FullName 'VivaLoopDesktop.exe'
+          dotnet run --project build/patcher/VpsCapturePatcher.csproj --configuration Release -- $exe (Join-Path $root.FullName 'VivaLoopDesktop.patched.exe')
+          if ($LASTEXITCODE -ne 0) { throw 'Patcher falhou.' }
+          Move-Item (Join-Path $root.FullName 'VivaLoopDesktop.patched.exe') $exe -Force
+          @'
+          VIVALOOP DESKTOP — VPS CAPTURE TEST
+
+          Esta build é isolada para testar o TikTok LIVE Studio em VPS/RDP.
+          Alteração desta build: Chrome embutido inicia com --disable-gpu e --disable-infobars.
+          Nenhum arquivo da versão principal do vivaloop-desktop foi alterado por esta build.
+
+          TESTE:
+          1. Extraia o ZIP inteiro.
+          2. Abra VivaLoopDesktop.exe.
+          3. No TikTok LIVE Studio, tente adicionar a janela "VivaLoop — Vídeo".
+          4. Se adicionar normalmente, o próximo passo é corrigir a configuração gráfica da versão VPS.
+          5. Se continuar falhando, seguimos para o próximo teste de captura.
+
+          NÃO instale por cima da versão principal.
+          '@ | Set-Content -Encoding UTF8 (Join-Path $root.FullName 'VPS-CAPTURE-TEST.txt')
+          Compress-Archive -Path $root.FullName -DestinationPath dist/VivaLoop-Desktop-VPS-CAPTURE-TEST-Windows.zip -CompressionLevel Optimal -Force
+          Get-FileHash dist/VivaLoop-Desktop-VPS-CAPTURE-TEST-Windows.zip -Algorithm SHA256 | Format-List | Out-File dist/SHA256.txt -Encoding ascii
+      - name: Upload test artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VivaLoop-VPS-CAPTURE-TEST-Windows
+          path: |
+            dist/VivaLoop-Desktop-VPS-CAPTURE-TEST-Windows.zip
+            dist/SHA256.txt
+          retention-days: 14
+          compression-level: 0
