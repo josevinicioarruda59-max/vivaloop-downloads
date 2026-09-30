@@ -1,0 +1,236 @@
+name: Validate and publish protected Windows v0.36.0 secure handoff
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-protected-windows-0360-handoff.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-protected-windows-v0.36.0
+  cancel-in-progress: false
+
+jobs:
+  validate-and-publish:
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - name: Check out public distribution repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: true
+          show-progress: false
+
+      - name: Create one-time encrypted source handoff
+        shell: pwsh
+        run: |
+          $runId='${{ github.run_id }}'
+          $sourceRevision='b3e8311c5187b33ffa999248cf0e0b14d35cc3bf'
+          $aad="VivaLoop-v0.36.0-source-$sourceRevision"
+          $handoff=Join-Path 'handoff' $runId
+          New-Item -ItemType Directory -Path $handoff -Force | Out-Null
+          $rsa=[Security.Cryptography.RSA]::Create(4096)
+          try {
+            $public=$rsa.ExportSubjectPublicKeyInfo()
+            $private=$rsa.ExportPkcs8PrivateKey()
+          } finally {$rsa.Dispose()}
+          $privatePath=Join-Path $env:RUNNER_TEMP "vivaloop-$runId-private.der"
+          [IO.File]::WriteAllBytes($privatePath,$private)
+          [Convert]::ToBase64String($public) | Set-Content -LiteralPath (Join-Path $handoff 'public-key.b64') -Encoding ascii -NoNewline
+          [ordered]@{
+            runId=$runId
+            sourceRevision=$sourceRevision
+            encryption='RSA-OAEP-SHA256 + AES-256-GCM'
+            aad=$aad
+            expiresUtc=[DateTime]::UtcNow.AddMinutes(15).ToString('o')
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $handoff 'request.json') -Encoding utf8
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- $handoff
+          git commit -m "Open one-time encrypted source handoff for run $runId"
+          if($LASTEXITCODE -ne 0){throw 'Could not commit the one-time handoff public key'}
+          git push origin HEAD:main
+          if($LASTEXITCODE -ne 0){throw 'Could not publish the one-time handoff public key'}
+          "VIVALOOP_HANDOFF_PRIVATE=$privatePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VIVALOOP_HANDOFF_AAD=$aad" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VIVALOOP_HANDOFF_ID=$runId" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Output "HANDOFF_READY:$runId"
+
+      - name: Wait for encrypted updater source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github.raw'}
+          $base="https://api.github.com/repos/josevinicioarruda59-max/vivaloop-downloads/contents/handoff/$env:VIVALOOP_HANDOFF_ID"
+          $keyText=$null;$payloadText=$null
+          for($attempt=1;$attempt -le 120;$attempt++){
+            try {
+              $keyText=(Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri "$base/source-key.b64?ref=main&attempt=$attempt").Content.Trim()
+              $payloadText=(Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri "$base/source-payload.b64?ref=main&attempt=$attempt").Content.Trim()
+              if($keyText -and $payloadText){break}
+            } catch {
+              if($attempt -eq 120){throw}
+            }
+            Start-Sleep -Seconds 5
+          }
+          if([String]::IsNullOrWhiteSpace($keyText) -or [String]::IsNullOrWhiteSpace($payloadText)){throw 'Encrypted source handoff did not arrive before timeout'}
+          $keyText | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'source-key.b64') -Encoding ascii -NoNewline
+          $payloadText | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'source-payload.b64') -Encoding ascii -NoNewline
+
+      - name: Decrypt and verify updater source
+        shell: pwsh
+        run: |
+          $encryptedKey=[Convert]::FromBase64String((Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'source-key.b64') -Raw).Trim())
+          $payload=[Convert]::FromBase64String((Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'source-payload.b64') -Raw).Trim())
+          if($payload.Length -lt 29){throw 'Encrypted source payload is truncated'}
+          $rsa=[Security.Cryptography.RSA]::Create()
+          try {
+            $read=0
+            $rsa.ImportPkcs8PrivateKey([IO.File]::ReadAllBytes($env:VIVALOOP_HANDOFF_PRIVATE),[ref]$read)
+            $aesKey=$rsa.Decrypt($encryptedKey,[Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+          } finally {$rsa.Dispose()}
+          if($aesKey.Length -ne 32){throw 'Invalid one-time source key'}
+          [byte[]]$nonce=$payload[0..11]
+          [byte[]]$cipher=$payload[12..($payload.Length-17)]
+          [byte[]]$tag=$payload[($payload.Length-16)..($payload.Length-1)]
+          $plain=New-Object byte[] $cipher.Length
+          $aad=[Text.Encoding]::UTF8.GetBytes($env:VIVALOOP_HANDOFF_AAD)
+          $aes=[Security.Cryptography.AesGcm]::new($aesKey,16)
+          try {$aes.Decrypt($nonce,$cipher,$tag,$plain,$aad)} finally {$aes.Dispose();[Array]::Clear($aesKey,0,$aesKey.Length)}
+          $archive=Join-Path $env:RUNNER_TEMP 'vivaloop-updater-source.zip'
+          [IO.File]::WriteAllBytes($archive,$plain)
+          [Array]::Clear($plain,0,$plain.Length)
+          New-Item -ItemType Directory -Path source -Force | Out-Null
+          Expand-Archive -LiteralPath $archive -DestinationPath source -Force
+          $manifest=Get-Content -LiteralPath source/handoff-manifest.json -Raw | ConvertFrom-Json
+          if($manifest.sourceRevision -ne 'b3e8311c5187b33ffa999248cf0e0b14d35cc3bf'){throw 'Unexpected updater source revision in handoff'}
+          foreach($file in $manifest.files){
+            $path=Join-Path source $file.path
+            if(-not (Test-Path -LiteralPath $path -PathType Leaf)){throw "Handoff source file missing: $($file.path)"}
+            $actual=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if($actual -ne $file.sha256){throw "Handoff source digest mismatch: $($file.path)"}
+          }
+          Remove-Item -LiteralPath $env:VIVALOOP_HANDOFF_PRIVATE,$archive,(Join-Path $env:RUNNER_TEMP 'source-key.b64'),(Join-Path $env:RUNNER_TEMP 'source-payload.b64') -Force -ErrorAction SilentlyContinue
+
+      - name: Compile and test protected updater migration
+        working-directory: source
+        shell: pwsh
+        run: |
+          $compiler="$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+          if(-not (Test-Path -LiteralPath $compiler)){throw '.NET Framework 4.x compiler not found'}
+          & $compiler /nologo /out:ProtectedPackageTests.exe /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll tools/UpdateProtocol.cs tools/WindowsProtectedPackage.cs tools/ProtectedPackageTests.cs
+          if($LASTEXITCODE -ne 0){throw 'Protected package tests did not compile'}
+          .\ProtectedPackageTests.exe
+          if($LASTEXITCODE -ne 0){throw 'Protected package tests failed'}
+          .\tools\Test-ProtectedMigration.ps1
+          if($LASTEXITCODE -ne 0){throw 'Legacy-to-protected migration test failed'}
+
+      - name: Download and verify exact original protected release
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $expectedDigest='sha256:a7829450e3d35109605c7fba55514379b8da4732e5f8373403c305175c56b4cc'
+          $expectedSize=485363662L
+          $release=Invoke-RestMethod 'https://api.github.com/repos/josevinicioarruda59-max/vivaloop-downloads/releases/latest' -Headers @{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json'}
+          if($release.draft -or $release.prerelease -or $release.tag_name -ne 'v0.36.0'){throw 'Latest stable release is no longer expected v0.36.0 source'}
+          $name='VivaLoop-Desktop-v0.36.0-Windows.zip'
+          $asset=@($release.assets | Where-Object {$_.name -eq $name})
+          $expectedUrl="https://github.com/josevinicioarruda59-max/vivaloop-downloads/releases/download/v0.36.0/$name"
+          if($asset.Count -ne 1 -or $asset[0].state -ne 'uploaded' -or $asset[0].browser_download_url -ne $expectedUrl){throw 'Original Windows release asset is missing or unexpected'}
+          if($asset[0].digest -ne $expectedDigest -or [long]$asset[0].size -ne $expectedSize){throw 'Public source asset changed; refusing to publish from different bytes'}
+          New-Item -ItemType Directory -Path build -Force | Out-Null
+          curl.exe -L --fail --retry 3 --retry-delay 3 -o build/original-v0.36.0.zip $expectedUrl
+          if($LASTEXITCODE -ne 0){throw 'Protected release download failed'}
+          $actual='sha256:'+((Get-FileHash -LiteralPath build/original-v0.36.0.zip -Algorithm SHA256).Hash.ToLowerInvariant())
+          if($actual -ne $expectedDigest -or (Get-Item -LiteralPath build/original-v0.36.0.zip).Length -ne $expectedSize){throw 'Downloaded protected release failed pinned digest or size check'}
+
+      - name: Build compatibility package from protected release
+        working-directory: source
+        shell: pwsh
+        run: |
+          .\tools\Build-ProtectedBridge.ps1 -Package build/original-v0.36.0.zip -Version 0.36.0 -ExpectedSha256 a7829450e3d35109605c7fba55514379b8da4732e5f8373403c305175c56b4cc
+          if($LASTEXITCODE -ne 0){throw 'Compatibility package build failed'}
+          if(-not (Test-Path -LiteralPath 'dist/protected-bridge/VivaLoop-Desktop-v0.36.0-Windows-compat.zip')){throw 'Compatibility candidate was not created'}
+
+      - name: Start real protected application without credentials
+        working-directory: source
+        shell: pwsh
+        run: |
+          .\tools\Test-ProtectedStartup.ps1 -Candidate dist/protected-bridge/VivaLoop-Desktop-v0.36.0-Windows-compat.zip -Version 0.36.0 -OutputDirectory dist/protected-bridge/startup-smoke -TimeoutSeconds 40
+          if($LASTEXITCODE -ne 0){throw 'Real protected application startup test failed'}
+
+      - name: Stage exact public asset name
+        working-directory: source
+        shell: pwsh
+        run: |
+          $candidate=(Resolve-Path -LiteralPath 'dist/protected-bridge/VivaLoop-Desktop-v0.36.0-Windows-compat.zip').Path
+          New-Item -ItemType Directory -Path dist/publish -Force | Out-Null
+          $asset=(Join-Path (Resolve-Path -LiteralPath dist/publish).Path 'VivaLoop-Desktop-v0.36.0-Windows.zip')
+          Copy-Item -LiteralPath $candidate -Destination $asset -Force
+          $hash=(Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          $size=(Get-Item -LiteralPath $asset).Length
+          if($size -le 0 -or $size -gt 2147483648L){throw 'Candidate size is outside updater contract'}
+          $hash | Set-Content -LiteralPath dist/publish/SHA256-Windows.txt -Encoding ascii
+          [ordered]@{sourceRevision='b3e8311c5187b33ffa999248cf0e0b14d35cc3bf';sourceProtectedSha256='a7829450e3d35109605c7fba55514379b8da4732e5f8373403c305175c56b4cc';candidateSha256=$hash;candidateSize=$size;validatedUtc=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath dist/publish/validation-summary.json -Encoding utf8
+          "VIVALOOP_CANDIDATE_HASH=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VIVALOOP_CANDIDATE_SIZE=$size" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Replace public Windows asset after every test passed
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $asset=(Resolve-Path -LiteralPath 'dist/publish/VivaLoop-Desktop-v0.36.0-Windows.zip').Path
+          gh release upload v0.36.0 $asset --repo josevinicioarruda59-max/vivaloop-downloads --clobber
+          if($LASTEXITCODE -ne 0){throw 'GitHub release asset replacement failed'}
+          @'
+          VivaLoop Desktop v0.36.0
+
+          - Pacote Windows compatível com o atualizador das versões 0.35.x.
+          - Mantém, byte por byte, o conteúdo protegido original da v0.36.0.
+          - Preserva a instalação anterior e os arquivos pessoais durante a migração.
+          - Validado no Windows com testes de pacote, migração e abertura do aplicativo protegido sem inserir credenciais.
+          '@ | Set-Content -LiteralPath dist/publish/release-notes.md -Encoding utf8
+          gh release edit v0.36.0 --repo josevinicioarruda59-max/vivaloop-downloads --title 'VivaLoop Desktop v0.36.0' --notes-file dist/publish/release-notes.md
+          if($LASTEXITCODE -ne 0){throw 'GitHub release notes update failed'}
+
+      - name: Verify asset GitHub is serving
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $expectedHash=$env:VIVALOOP_CANDIDATE_HASH
+          $expectedSize=[long]$env:VIVALOOP_CANDIDATE_SIZE
+          $verified=$false
+          for($attempt=1;$attempt -le 20;$attempt++){
+            $release=Invoke-RestMethod 'https://api.github.com/repos/josevinicioarruda59-max/vivaloop-downloads/releases/tags/v0.36.0' -Headers @{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json'}
+            $asset=@($release.assets | Where-Object {$_.name -eq 'VivaLoop-Desktop-v0.36.0-Windows.zip'})
+            if($asset.Count -eq 1 -and $asset[0].state -eq 'uploaded' -and $asset[0].digest -eq ('sha256:'+$expectedHash) -and [long]$asset[0].size -eq $expectedSize){$verified=$true;break}
+            Start-Sleep -Seconds 3
+          }
+          if(-not $verified){throw 'GitHub is not reporting newly validated asset digest and size'}
+          [ordered]@{release='v0.36.0';asset='VivaLoop-Desktop-v0.36.0-Windows.zip';sha256=$expectedHash;size=$expectedSize;publishedUtc=[DateTime]::UtcNow.ToString('o');sourceRevision='b3e8311c5187b33ffa999248cf0e0b14d35cc3bf'} | ConvertTo-Json | Set-Content -LiteralPath dist/publish/publication-report.json -Encoding utf8
+          Write-Output "PASS: GitHub serves validated v0.36.0 Windows compatibility asset: sha256:$expectedHash"
+
+      - name: Preserve validation reports
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: VivaLoop-v0.36.0-secure-publication-reports
+          path: |
+            source/dist/protected-bridge/startup-smoke/*
+            source/dist/publish/SHA256-Windows.txt
+            source/dist/publish/validation-summary.json
+            source/dist/publish/publication-report.json
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: warn
