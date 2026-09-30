@@ -1,0 +1,170 @@
+name: Validate and publish protected Windows v0.36.0
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-protected-windows-0360.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-protected-windows-v0.36.0
+  cancel-in-progress: false
+
+jobs:
+  validate-and-publish:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - name: Check out the exact private updater revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          repository: josevinicioarruda59-max/vivaloop-desktop
+          ref: b3e8311c5187b33ffa999248cf0e0b14d35cc3bf
+          ssh-key: ${{ secrets.TEMP_VIVALOOP_SOURCE_0356 }}
+          show-progress: false
+
+      - name: Verify source revision
+        shell: pwsh
+        run: |
+          $expected='b3e8311c5187b33ffa999248cf0e0b14d35cc3bf'
+          $actual=(git rev-parse HEAD).Trim()
+          if($actual -ne $expected){throw "Unexpected updater source revision: $actual"}
+          git diff --check
+          if($LASTEXITCODE -ne 0){throw 'Source whitespace validation failed'}
+
+      - name: Compile and test the updater and protected migration
+        shell: pwsh
+        run: |
+          $compiler="$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+          if(-not (Test-Path -LiteralPath $compiler)){throw '.NET Framework 4.x compiler not found'}
+          & $compiler /nologo /out:ProtectedPackageTests.exe /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll tools/UpdateProtocol.cs tools/WindowsProtectedPackage.cs tools/ProtectedPackageTests.cs
+          if($LASTEXITCODE -ne 0){throw 'Protected package tests did not compile'}
+          .\ProtectedPackageTests.exe
+          if($LASTEXITCODE -ne 0){throw 'Protected package tests failed'}
+          .\tools\Test-UpdateInstall.ps1
+          & $compiler /nologo /out:UpdateTransactionTests.exe /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll tools/WindowsUpdateInstaller.cs tools/UpdateTransactionTests.cs
+          if($LASTEXITCODE -ne 0){throw 'Transaction tests did not compile'}
+          .\UpdateTransactionTests.exe
+          if($LASTEXITCODE -ne 0){throw 'Transaction rollback tests failed'}
+          .\tools\Test-ProtectedMigration.ps1
+          if($LASTEXITCODE -ne 0){throw 'Legacy-to-protected migration test failed'}
+          node --test tests/updater-contract.test.mjs
+          if($LASTEXITCODE -ne 0){throw 'Updater contract tests failed'}
+
+      - name: Download and verify the exact original protected release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $expectedDigest='sha256:a7829450e3d35109605c7fba55514379b8da4732e5f8373403c305175c56b4cc'
+          $expectedSize=485363662L
+          $release=Invoke-RestMethod 'https://api.github.com/repos/josevinicioarruda59-max/vivaloop-downloads/releases/latest' -Headers @{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json'}
+          if($release.draft -or $release.prerelease -or $release.tag_name -ne 'v0.36.0'){throw 'The latest stable release is no longer the expected v0.36.0 source'}
+          $name='VivaLoop-Desktop-v0.36.0-Windows.zip'
+          $asset=@($release.assets | Where-Object {$_.name -eq $name})
+          $expectedUrl="https://github.com/josevinicioarruda59-max/vivaloop-downloads/releases/download/v0.36.0/$name"
+          if($asset.Count -ne 1 -or $asset[0].state -ne 'uploaded' -or $asset[0].browser_download_url -ne $expectedUrl){throw 'The original Windows release asset is missing or unexpected'}
+          if($asset[0].digest -ne $expectedDigest -or [long]$asset[0].size -ne $expectedSize){throw 'The public source asset changed; refusing to rebuild or publish from different bytes'}
+          New-Item -ItemType Directory -Path build -Force | Out-Null
+          curl.exe -L --fail --retry 3 --retry-delay 3 -o build/original-v0.36.0.zip $expectedUrl
+          if($LASTEXITCODE -ne 0){throw 'Protected release download failed'}
+          $actual='sha256:'+((Get-FileHash -LiteralPath build/original-v0.36.0.zip -Algorithm SHA256).Hash.ToLowerInvariant())
+          if($actual -ne $expectedDigest -or (Get-Item -LiteralPath build/original-v0.36.0.zip).Length -ne $expectedSize){throw 'Downloaded protected release failed its pinned digest or size check'}
+
+      - name: Build the compatibility package from the protected release
+        shell: pwsh
+        run: |
+          .\tools\Build-ProtectedBridge.ps1 -Package build/original-v0.36.0.zip -Version 0.36.0 -ExpectedSha256 a7829450e3d35109605c7fba55514379b8da4732e5f8373403c305175c56b4cc
+          if($LASTEXITCODE -ne 0){throw 'Compatibility package build failed'}
+          $candidate='dist/protected-bridge/VivaLoop-Desktop-v0.36.0-Windows-compat.zip'
+          if(-not (Test-Path -LiteralPath $candidate)){throw 'Compatibility candidate was not created'}
+
+      - name: Start the real protected application without credentials
+        shell: pwsh
+        run: |
+          .\tools\Test-ProtectedStartup.ps1 -Candidate dist/protected-bridge/VivaLoop-Desktop-v0.36.0-Windows-compat.zip -Version 0.36.0 -OutputDirectory dist/protected-bridge/startup-smoke -TimeoutSeconds 40
+          if($LASTEXITCODE -ne 0){throw 'The real protected application startup test failed'}
+
+      - name: Stage the exact public asset name
+        shell: pwsh
+        run: |
+          $candidate=(Resolve-Path -LiteralPath 'dist/protected-bridge/VivaLoop-Desktop-v0.36.0-Windows-compat.zip').Path
+          New-Item -ItemType Directory -Path dist/publish -Force | Out-Null
+          $asset=(Join-Path (Resolve-Path -LiteralPath dist/publish).Path 'VivaLoop-Desktop-v0.36.0-Windows.zip')
+          Copy-Item -LiteralPath $candidate -Destination $asset -Force
+          $hash=(Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          $size=(Get-Item -LiteralPath $asset).Length
+          if($size -le 0 -or $size -gt 2147483648L){throw 'Candidate size is outside the updater contract'}
+          $hash | Set-Content -LiteralPath dist/publish/SHA256-Windows.txt -Encoding ascii
+          [ordered]@{
+            sourceRevision='b3e8311c5187b33ffa999248cf0e0b14d35cc3bf'
+            sourceProtectedSha256='a7829450e3d35109605c7fba55514379b8da4732e5f8373403c305175c56b4cc'
+            candidateSha256=$hash
+            candidateSize=$size
+            validatedUtc=[DateTime]::UtcNow.ToString('o')
+          } | ConvertTo-Json | Set-Content -LiteralPath dist/publish/validation-summary.json -Encoding utf8
+          "VIVALOOP_CANDIDATE_HASH=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VIVALOOP_CANDIDATE_SIZE=$size" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Replace the public Windows asset only after every test passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $asset=(Resolve-Path -LiteralPath 'dist/publish/VivaLoop-Desktop-v0.36.0-Windows.zip').Path
+          gh release upload v0.36.0 $asset --repo josevinicioarruda59-max/vivaloop-downloads --clobber
+          if($LASTEXITCODE -ne 0){throw 'GitHub release asset replacement failed'}
+          @'
+          VivaLoop Desktop v0.36.0
+
+          - Pacote Windows compatível com o atualizador das versões 0.35.x.
+          - Mantém, byte por byte, o conteúdo protegido original da v0.36.0.
+          - Preserva a instalação anterior e os arquivos pessoais durante a migração.
+          - Validado no Windows com testes de pacote, transação, migração e abertura do aplicativo protegido sem inserir credenciais.
+          '@ | Set-Content -LiteralPath dist/publish/release-notes.md -Encoding utf8
+          gh release edit v0.36.0 --repo josevinicioarruda59-max/vivaloop-downloads --title 'VivaLoop Desktop v0.36.0' --notes-file dist/publish/release-notes.md
+          if($LASTEXITCODE -ne 0){throw 'GitHub release notes update failed'}
+
+      - name: Verify the asset GitHub is serving
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $expectedHash=$env:VIVALOOP_CANDIDATE_HASH
+          $expectedSize=[long]$env:VIVALOOP_CANDIDATE_SIZE
+          $verified=$false
+          for($attempt=1;$attempt -le 20;$attempt++){
+            $release=Invoke-RestMethod 'https://api.github.com/repos/josevinicioarruda59-max/vivaloop-downloads/releases/tags/v0.36.0' -Headers @{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json'}
+            $asset=@($release.assets | Where-Object {$_.name -eq 'VivaLoop-Desktop-v0.36.0-Windows.zip'})
+            if($asset.Count -eq 1 -and $asset[0].state -eq 'uploaded' -and $asset[0].digest -eq ('sha256:'+$expectedHash) -and [long]$asset[0].size -eq $expectedSize){$verified=$true;break}
+            Start-Sleep -Seconds 3
+          }
+          if(-not $verified){throw 'GitHub is not reporting the newly validated asset digest and size'}
+          [ordered]@{
+            release='v0.36.0'
+            asset='VivaLoop-Desktop-v0.36.0-Windows.zip'
+            sha256=$expectedHash
+            size=$expectedSize
+            publishedUtc=[DateTime]::UtcNow.ToString('o')
+            sourceRevision='b3e8311c5187b33ffa999248cf0e0b14d35cc3bf'
+          } | ConvertTo-Json | Set-Content -LiteralPath dist/publish/publication-report.json -Encoding utf8
+          Write-Output "PASS: GitHub serves the validated v0.36.0 Windows compatibility asset: sha256:$expectedHash"
+
+      - name: Preserve validation reports
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: VivaLoop-v0.36.0-publication-reports
+          path: |
+            dist/protected-bridge/startup-smoke/*
+            dist/publish/SHA256-Windows.txt
+            dist/publish/validation-summary.json
+            dist/publish/publication-report.json
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: warn
