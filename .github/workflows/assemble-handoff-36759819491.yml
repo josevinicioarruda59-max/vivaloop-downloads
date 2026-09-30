@@ -1,0 +1,56 @@
+name: Assemble encrypted VivaLoop source handoff 36759819491
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'handoff/36759819491/assemble.request'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: assemble-vivaloop-handoff-36759819491
+  cancel-in-progress: false
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: true
+          show-progress: false
+      - name: Assemble and verify ciphertext
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir='handoff/36759819491'
+          output="$dir/source-payload.b64"
+          : > "$output"
+          for i in 00 01 02 03 04 05 06 07 08 09; do
+            part="$dir/source-payload-part-$i.b64"
+            test -f "$part"
+            test "$(wc -c < "$part" | tr -d ' ')" = '4920'
+            tr -d '\r\n' < "$part" >> "$output"
+          done
+          test "$(wc -c < "$output" | tr -d ' ')" = '49200'
+          python - <<'PY'
+          import base64, hashlib, pathlib
+          path=pathlib.Path('handoff/36759819491/source-payload.b64')
+          text=path.read_text().strip()
+          raw=base64.b64decode(text, validate=True)
+          assert len(raw)==36899, len(raw)
+          digest=hashlib.sha256(raw).hexdigest()
+          assert digest=='e295279e7a7ac92024a0d28c7386dae58d1f058d841366edb09cc29cbce0a750', digest
+          PY
+      - name: Publish assembled encrypted payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add handoff/36759819491/source-payload.b64
+          git commit -m 'Assemble encrypted source payload for run 36759819491'
+          git push origin HEAD:main
