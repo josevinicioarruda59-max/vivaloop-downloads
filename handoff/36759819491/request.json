@@ -1,0 +1,7 @@
+{
+  "runId": "36759819491",
+  "sourceRevision": "b3e8311c5187b33ffa999248cf0e0b14d35cc3bf",
+  "encryption": "RSA-OAEP-SHA256 + AES-256-GCM",
+  "aad": "VivaLoop-v0.36.0-source-b3e8311c5187b33ffa999248cf0e0b14d35cc3bf",
+  "expiresUtc": "2026-09-30T18:51:59.7320218Z"
+}
